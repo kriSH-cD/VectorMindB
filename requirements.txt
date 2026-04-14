@@ -1,0 +1,27 @@
+# FastAPI & Server
+fastapi==0.115.9
+uvicorn[standard]==0.34.2
+python-multipart==0.0.20
+python-dotenv==1.1.0
+pydantic-settings==2.9.1
+
+# PDF Parsing
+pdfplumber==0.11.6
+
+# External APIs
+openai>=1.0.0
+requests>=2.31.0
+numpy>=1.24.0
+
+# Vector Database
+chromadb==1.0.7
+
+# Keyword Search
+rank-bm25==0.2.2
+
+# LLM
+openai>=1.0.0
+
+# Utilities
+tiktoken>=0.7.0
+numpy>=1.24.0
