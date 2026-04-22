@@ -5,17 +5,12 @@ VectorMind - Vector Store
 ===========================
 High-level abstraction over ChromaDB for storing and querying document chunks.
 
-Responsibilities:
-  - Adding document chunks with their embeddings and metadata to ChromaDB.
-  - Querying by embedding vector to retrieve similar chunks.
-  - Fetching all stored documents (used to rebuild the BM25 index on startup).
-  - Generating unique, deterministic IDs for each chunk to prevent duplicates
-    when the same PDF is uploaded multiple times.
+Supports chat-scoped collections to ensure complete session isolation.
+Each chat session gets its own ChromaDB collection: chat_{chat_id}.
 """
 
 import hashlib
 import logging
-from functools import lru_cache
 
 import chromadb
 
@@ -27,19 +22,22 @@ logger = logging.getLogger(__name__)
 
 
 class VectorStore:
-    """Manages document storage and retrieval in ChromaDB."""
+    """Manages document storage and retrieval in a specific ChromaDB collection."""
 
-    def __init__(self):
+    def __init__(self, collection_name: str | None = None):
         settings = get_settings()
-        client = get_chroma_client()
+        self._client = get_chroma_client()
+
+        # Use the provided collection name, or fall back to the global default
+        self._collection_name = collection_name or settings.chroma_collection_name
 
         # Get or create the collection (idempotent)
-        self.collection = client.get_or_create_collection(
-            name=settings.chroma_collection_name,
+        self.collection = self._client.get_or_create_collection(
+            name=self._collection_name,
             metadata={"hnsw:space": "cosine"},  # Use cosine similarity
         )
         logger.info(
-            f"ChromaDB collection '{settings.chroma_collection_name}' ready "
+            f"ChromaDB collection '{self._collection_name}' ready "
             f"({self.collection.count()} documents currently stored)."
         )
 
@@ -85,7 +83,7 @@ class VectorStore:
             metadatas=metadatas,
         )
 
-        logger.info(f"Upserted {len(chunks)} chunks into ChromaDB.")
+        logger.info(f"Upserted {len(chunks)} chunks into ChromaDB collection '{self._collection_name}'.")
 
     def query_by_embedding(
         self,
@@ -123,11 +121,6 @@ class VectorStore:
         """
         Retrieve ALL documents and metadata from the collection.
 
-        This is used on application startup to reconstruct the in-memory
-        BM25 index from the persistent ChromaDB store. Since BM25 is a
-        pure keyword-based method, it doesn't need embeddings — just text
-        and metadata.
-
         Returns:
             ChromaDB get() result dict with 'ids', 'documents', 'metadatas'.
         """
@@ -149,20 +142,30 @@ class VectorStore:
     def clear_all(self) -> None:
         """
         Delete all documents from the collection.
-        This provides a secure way to wipe the memory on an explicit user request
-        or when a fresh session starts.
         """
         try:
             results = self.collection.get()
             ids = results.get("ids", [])
             if ids:
                 self.collection.delete(ids=ids)
-            logger.info("ChromaDB collection cleared successfully.")
+            logger.info(f"ChromaDB collection '{self._collection_name}' cleared successfully.")
         except Exception as e:
             logger.error(f"Failed to clear ChromaDB collection: {e}")
 
+    def delete_collection(self) -> None:
+        """Delete the entire collection from ChromaDB."""
+        try:
+            self._client.delete_collection(self._collection_name)
+            logger.info(f"ChromaDB collection '{self._collection_name}' deleted.")
+        except Exception as e:
+            logger.error(f"Failed to delete ChromaDB collection '{self._collection_name}': {e}")
 
-@lru_cache()
-def get_vector_store() -> VectorStore:
-    """Return a cached singleton VectorStore instance."""
-    return VectorStore()
+
+def get_vector_store(collection_name: str | None = None) -> VectorStore:
+    """
+    Create a VectorStore instance for the given collection.
+    
+    If collection_name is None, uses the global default from settings.
+    Chat-scoped stores should pass collection_name=f"chat_{chat_id}".
+    """
+    return VectorStore(collection_name=collection_name)

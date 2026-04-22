@@ -55,13 +55,30 @@ class Embedder:
         # Jina returns { "data": [ { "embedding": [...] }, ... ] }
         return [item["embedding"] for item in data.get("data", [])]
 
+    # Cache recent query embeddings to avoid redundant API calls
+    _query_cache: dict[str, list[float]] = {}
+    _CACHE_MAX_SIZE = 50
+
     def embed_query(self, query: str) -> list[float]:
         """
         Generate an embedding for a simple query string.
+        Cached to avoid duplicate API calls for the same query.
         """
+        # Check cache first
+        if query in self._query_cache:
+            logger.debug(f"[Embedder] Cache HIT for query: '{query[:50]}...'")
+            return self._query_cache[query]
+
         embeddings = self.embed([query])
         if not embeddings:
             raise RuntimeError("Jina API returned empty embeddings for query.")
+        
+        # Store in cache (evict oldest if full)
+        if len(self._query_cache) >= self._CACHE_MAX_SIZE:
+            oldest_key = next(iter(self._query_cache))
+            del self._query_cache[oldest_key]
+        self._query_cache[query] = embeddings[0]
+        
         return embeddings[0]
 
 

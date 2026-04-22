@@ -39,7 +39,7 @@ FALLBACK_RESPONSE = (
 # Prevents prompt overflow and keeps context focused.
 # 1000 chars ≈ 200-250 tokens — safe for up to 5 chunks.
 # ────────────────────────────────────────────────────────────────
-MAX_CHUNK_CHARS = 1000
+MAX_CHUNK_CHARS = 600
 
 
 # ────────────────────────────────────────────────────────────────
@@ -65,9 +65,9 @@ SYSTEM_PROMPT = """You are VectorMind, an expert document question-answering ass
    - For the missing part, explicitly state: "This information is not available in the provided documents."
    - Do NOT guess or infer the missing information.
 
-4. **COMPLETE FALLBACK**: If NO part of the answer exists in the provided context, respond EXACTLY with:
-   "The answer to your question was not found in the uploaded documents."
-   Do NOT attempt to guess, infer, or fabricate any part of the answer.
+4. **COMPLETE FALLBACK**: If the question asks about a topic that is NOT covered in the provided context AT ALL, respond with ONLY this single sentence and NOTHING else:
+   "This information is not available in the provided documents."
+   Do NOT add any Sources section. Do NOT include any snippets. Do NOT say anything else. Just that one sentence.
 
 5. **CONVERSATIONAL CONTEXT**: You must use the provided conversation history to understand references like 'above', 'that', 'previous answer', or 'it'. If the reference remains unclear even with history, clearly state that you do not understand the reference.
 
@@ -77,7 +77,7 @@ SYSTEM_PROMPT = """You are VectorMind, an expert document question-answering ass
 
 ## REQUIRED OUTPUT FORMAT:
 
-You MUST structure your response in EXACTLY this format:
+When the answer IS found in the context, structure your response in EXACTLY this format:
 
 Answer:
 <your answer with inline citations (Page X, filename.pdf) in every sentence>
@@ -86,11 +86,13 @@ Sources:
 - (Page X, filename.pdf): <short supporting snippet, max 2 lines>
 - (Page Y, filename.pdf): <short supporting snippet, max 2 lines>
 
+When the answer is NOT found in the context, respond with ONLY:
+This information is not available in the provided documents.
+
 IMPORTANT:
-- The "Answer:" section contains your full response with inline citations.
-- The "Sources:" section lists each unique source with a SHORT snippet (1-2 lines max) that supports the answer.
+- The "Sources:" section should ONLY appear when you have a real answer.
+- If using the fallback message, do NOT include a Sources section. Output ONLY the fallback sentence.
 - Do NOT dump entire paragraphs in the Sources section.
-- If using the fallback message, do NOT include a Sources section.
 """
 
 
@@ -145,8 +147,8 @@ def build_user_prompt(query: str, chunks: list[dict], chat_history: list[dict] |
     
     history_block = ""
     if chat_history and len(chat_history) > 0:
-        # Take the last 5 messages to avoid overflow
-        recent_history = chat_history[-5:]
+        # Take the last 3 messages to keep prompt lean
+        recent_history = chat_history[-3:]
         lines = []
         for msg in recent_history:
             role = "User" if msg.get("role") == "user" else "Assistant"
@@ -168,8 +170,9 @@ def build_user_prompt(query: str, chunks: list[dict], chat_history: list[dict] |
         f"2. EVERY factual sentence must include a citation: (Page X, filename.pdf).\n"
         f"3. If only part of the answer is available, answer that part and state "
         f"what is missing.\n"
-        f"4. If the answer is NOT in the context at all, say EXACTLY:\n"
-        f'   "{FALLBACK_RESPONSE}"\n'
-        f"5. Use the required output format: Answer: ... Sources: ...\n"
+        f"4. If the answer is NOT in the context at all, respond with ONLY this single sentence and NOTHING else:\n"
+        f'   "This information is not available in the provided documents."\n'
+        f"   Do NOT include any Sources section for fallback answers.\n"
+        f"5. When the answer IS found, use the format: Answer: ... Sources: ...\n"
         f"6. In the Sources section, include SHORT snippets only (max 2 lines each)."
     )

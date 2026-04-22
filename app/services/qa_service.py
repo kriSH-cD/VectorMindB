@@ -1,81 +1,112 @@
 from __future__ import annotations
 
 """
-VectorMind - QA Service
-=========================
-Orchestration layer that ties together all components for the two main operations:
-  1. upload_document — Ingest a PDF into the system.
-  2. ask_question    — Run the full RAG pipeline to answer a query.
+VectorMind - QA Service (Chat-Scoped)
+=======================================
+Orchestration layer with per-chat session isolation.
 
-This service acts as the bridge between the API endpoints and the core modules,
-keeping the FastAPI route handlers thin and focused on HTTP concerns.
+All operations are scoped to a chat_id:
+  - upload_document → stores in chat-specific ChromaDB collection
+  - ingest_text     → stores in chat-specific ChromaDB collection
+  - ask_question    → retrieves ONLY from that chat's collection
 """
 
 import logging
 
-from app.ingestion.pipeline import ingest_pdf
+from app.ingestion.pipeline import ingest_pdf, ingest_text as pipeline_ingest_text
 from app.retrieval.retriever import get_retriever
 from app.llm.generator import get_generator
 from app.llm.prompt import FALLBACK_RESPONSE
 
 logger = logging.getLogger(__name__)
 
+# No-document fallback — used when querying a chat with no uploaded content
+NO_DOCUMENTS_RESPONSE = (
+    "No documents have been uploaded to this chat session yet. "
+    "Please upload a PDF or paste text before asking questions."
+)
+
 
 class QAService:
     """High-level service orchestrating document upload and question answering."""
 
     def __init__(self):
-        self.retriever = get_retriever()
         self.generator = get_generator()
 
-    def upload_document(self, file_bytes: bytes, filename: str) -> dict:
+    def upload_document(self, file_bytes: bytes, filename: str, chat_id: str | None = None) -> dict:
         """
-        Process and ingest a PDF document.
-
-        Steps:
-          1. Run the ingestion pipeline (parse → chunk → embed → store).
-          2. Rebuild the BM25 index to include the new document.
+        Process and ingest a PDF document into a chat-specific collection.
 
         Args:
             file_bytes: Raw bytes of the uploaded PDF.
             filename:   Original filename.
+            chat_id:    Chat session ID for collection scoping.
 
         Returns:
             Summary dict with ingestion statistics.
         """
-        logger.info(f"[QAService] Uploading document: '{filename}'")
+        logger.info(f"[QAService] Uploading document: '{filename}' (chat={chat_id or 'GLOBAL'})")
 
-        # Run the full ingestion pipeline
-        result = ingest_pdf(file_bytes, filename)
-
-        # Rebuild BM25 index to include newly added chunks
-        self.retriever._rebuild_bm25_index()
-        logger.info("[QAService] BM25 index rebuilt after ingestion.")
+        # Run the full ingestion pipeline — scoped to this chat
+        result = ingest_pdf(file_bytes, filename, chat_id=chat_id)
 
         return result
 
-    def ask_question(self, query: str, filename: str | None = None, chat_history: list[dict] | None = None) -> dict:
+    def ingest_text(self, text: str, filename: str, chat_id: str | None = None) -> dict:
         """
-        Answer a user's question using the full RAG pipeline and conversation history.
+        Process and ingest raw text into a chat-specific collection.
 
-        Steps:
-          1. Hybrid retrieval (vector + BM25) → reranking.
-          2. LLM generation with retrieved context and history.
-          3. Format the response with answer + source citations.
+        Args:
+            text:     The raw text string to ingest.
+            filename: A label for this text.
+            chat_id:  Chat session ID for collection scoping.
+
+        Returns:
+            Summary dict with ingestion statistics.
+        """
+        logger.info(f"[QAService] Ingesting text: '{filename}' (chat={chat_id or 'GLOBAL'})")
+
+        result = pipeline_ingest_text(text, filename, chat_id=chat_id)
+
+        return result
+
+    def ask_question(
+        self,
+        query: str,
+        filename: str | None = None,
+        chat_history: list[dict] | None = None,
+        chat_id: str | None = None,
+    ) -> dict:
+        """
+        Answer a user's question using the full RAG pipeline.
+        
+        Retrieval is scoped to this chat's collection only.
+        Only the provided chat_history is sent to the LLM — no cross-chat mixing.
 
         Args:
             query:        The user's natural language question.
             filename:     Optional — restrict retrieval to a specific uploaded PDF.
-                          If None, searches across ALL uploaded documents.
-            chat_history: Optional list of previous chat messages.
+            chat_history: This chat's conversation history only.
+            chat_id:      Chat session ID for collection scoping.
 
         Returns:
             Dict with 'answer' (str) and 'sources' (list of source dicts).
         """
-        logger.info(f"[QAService] Answering query: '{query}' | File: {filename or 'ALL'}")
+        logger.info(f"[QAService] Answering query: '{query}' | Chat: {chat_id or 'GLOBAL'} | File: {filename or 'ALL'}")
 
-        # Stage 1: Retrieve relevant chunks (with optional file filter)
-        retrieved_chunks = self.retriever.retrieve(query, filename=filename)
+        # Create a chat-scoped retriever (its own collection + BM25 index)
+        retriever = get_retriever(chat_id=chat_id)
+
+        # Check if this chat has any documents at all
+        doc_count = retriever.vector_store.get_document_count()
+        if doc_count == 0:
+            return {
+                "answer": NO_DOCUMENTS_RESPONSE,
+                "sources": [],
+            }
+
+        # Stage 1: Retrieve relevant chunks from THIS chat only
+        retrieved_chunks = retriever.retrieve(query, filename=filename)
 
         if not retrieved_chunks:
             return {
@@ -83,19 +114,45 @@ class QAService:
                 "sources": [],
             }
 
-        # Stage 2: Generate answer with LLM
+        # Stage 2: Generate answer with LLM — only this chat's history
         answer = self.generator.generate(query, retrieved_chunks, chat_history=chat_history)
 
-        # Stage 3: Format source citations
-        # Only attach sources if the LLM actually found an answer using them.
+        # Stage 3: Detect fallback — strip sources when LLM couldn't answer
+        answer_lower = answer.lower()
         is_fallback = (
             answer == FALLBACK_RESPONSE or 
-            "not found" in answer.lower() or 
-            "not available" in answer.lower()
+            answer == NO_DOCUMENTS_RESPONSE or
+            "not found in the uploaded" in answer_lower or
+            "not found in the provided" in answer_lower or
+            "not available in the provided" in answer_lower or
+            "not available in the uploaded" in answer_lower or
+            "not mentioned in the" in answer_lower or
+            "does not contain" in answer_lower or
+            "do not contain" in answer_lower or
+            "no information" in answer_lower or
+            "not in the provided" in answer_lower or
+            "not present in" in answer_lower
         )
 
         if is_fallback:
+            # Strip any "Sources:" text block the LLM may have included
+            # and return a clean, source-free fallback answer
+            clean_answer = answer
+            if "sources:" in answer_lower:
+                # Cut everything from "Sources:" onward
+                idx = answer_lower.index("sources:")
+                clean_answer = answer[:idx].strip()
+            
+            # Remove "Answer:" prefix if present
+            if clean_answer.lower().startswith("answer:"):
+                clean_answer = clean_answer[7:].strip()
+            
+            # If after cleanup nothing meaningful remains, use standard fallback
+            if not clean_answer or len(clean_answer) < 10:
+                clean_answer = "This information is not available in the provided documents."
+            
             sources = []
+            answer = clean_answer
         else:
             sources = [
                 {

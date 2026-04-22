@@ -145,7 +145,7 @@ class LLMGenerator:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.1,
-                max_tokens=1024,
+                max_tokens=512,
                 top_p=0.9,
                 frequency_penalty=0.0,
                 presence_penalty=0.0,

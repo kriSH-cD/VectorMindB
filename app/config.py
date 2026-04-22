@@ -27,12 +27,12 @@ class Settings(BaseSettings):
     chroma_collection_name: str = "vectormind_docs"
 
     # ── Chunking Parameters ────────────────────────────────
-    chunk_size: int = 400          # Target tokens per chunk
-    chunk_overlap: int = 50        # Overlap tokens between chunks
+    chunk_size: int = 300          # Target tokens per chunk (smaller = faster LLM)
+    chunk_overlap: int = 40        # Overlap tokens between chunks
 
     # ── Retrieval Parameters ───────────────────────────────
-    vector_search_k: int = 10     # Candidates from vector search
-    final_top_k: int = 5          # Final chunks after reranking
+    vector_search_k: int = 5      # Candidates from vector search (was 10)
+    final_top_k: int = 3          # Final chunks sent to LLM (was 5)
     vector_weight: float = 0.7    # Weight for vector similarity
     bm25_weight: float = 0.3      # Weight for BM25 keyword match
 
